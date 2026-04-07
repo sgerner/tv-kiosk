@@ -94,8 +94,8 @@ echo "{\"device_id\": \"$DEVICE_ID\", \"token\": \"$DEVICE_TOKEN\", \"anon_key\"
 echo "Registration successful. Device ID: $DEVICE_ID"
 
 echo "--- 3. Installing OS Dependencies ---"
-# Switched from firefox-esr to PyQt6 WebView wrapper for low-RAM stability
-sudo apt-get install -y python3-pyqt6 python3-pyqt6.qtwebengine x11-xserver-utils unclutter python3-pip scrot
+# Switched to PyQt6 WebView and Openbox for minimal RAM overhead
+sudo apt-get install -y python3-pyqt6 python3-pyqt6.qtwebengine x11-xserver-utils unclutter python3-pip scrot openbox xinit
 
 # Install Python Websocket Client for the Agent
 pip3 install websocket-client requests --break-system-packages || pip3 install websocket-client requests
@@ -185,8 +185,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable farin-agent.service
 sudo systemctl start farin-agent.service
 
-echo "--- 6. Setting up Kiosk WebView Wrapper ---"
+echo "--- 6. Setting up Minimal X/Openbox Kiosk ---"
 mkdir -p "$USER_HOME/farin-agent"
+
+# Create the Python WebView wrapper
 cat <<<''EOF' > "$USER_HOME/farin-agent/kiosk.py"
 import sys
 import os
@@ -208,6 +210,38 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = KioskWindow(sys.argv[1])
     sys.exit(app.exec())
+EOF
+
+# Create .xinitrc to launch Openbox and the WebView
+cat <<<EOFEOF > "$USER_HOME/.xinitrc"
+# Disable screen blanking
+xset s off
+xset -dpms
+xset s noblank
+unclutter -idle 0.1 -root &
+
+# Start Openbox window manager
+openbox-session &
+
+# Launch the WebView wrapper
+python3 $USER_HOME/farin-agent/kiosk.py "$PROJECT_URL/tv?token=$DEVICE_TOKEN"
+EOF
+
+# Set Pi to boot to console (CLI) and auto-login
+sudo raspi-config nonint do_boot_behaviour 0
+sudo raspi-config nonint do_boot_wait 0
+
+# Auto-start X on login via .bash_profile
+cat <<<EOFEOF >> "$USER_HOME/.bash_profile"
+if [ -z "\$DISPLAY" ] && [ "\$(tty)" = "tty1" ]; then
+  startx
+fi
+EOF
+
+# Disable keyring prompts
+cat <<<EOFEOF >> "$USER_HOME/.xsessionrc"
+export GNOME_KEYRING_CONTROL=
+export GNOME_KEYRING_PID=
 EOF
 
 # Configure Autostart to use the Python wrapper
