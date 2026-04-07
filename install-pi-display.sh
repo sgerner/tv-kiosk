@@ -29,11 +29,19 @@ echo "--- 1. Preparing Environment ---"
 sudo apt-get update
 sudo apt-get install -y curl jq
 
-echo "--- 2. Registering Device with Farin Cloud ---"
-# Escape hostname for JSON
-SAFE_HOSTNAME=$(hostname | tr -d '"' | tr -d '\\')
+# Low-RAM Optimization: Increase Swap to 1GB
+if [ $(free -m | awk '/^Mem:/{print $2}') -lt 1024 ]; then
+    echo "Low RAM detected. Increasing swap space for stability..."
+    sudo dphys-swapfile swapoff || true
+    sudo sed -i 's/CONF_SWAPSIZE=.*/CONF_SWAPSIZE=1024/' /etc/dphys-swapfile
+    sudo dphys-swapfile setup
+    sudo dphys-swapfile swapon
+fi
 
-# Call the setup API directly from the script
+echo "--- 2. Registering Device with Farin Cloud ---"
+# ... (registration logic stays the same) ...
+# [Note: I am keeping your existing SAFE_HOSTNAME and curl logic here]
+SAFE_HOSTNAME=$(hostname | tr -d '"' | tr -d '\\')
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$API_URL" \
   -H "Content-Type: application/json" \
   -d "{\"code\": \"$SETUP_CODE\", \"nickname\": \"Raspberry Pi ($SAFE_HOSTNAME)\"}")
@@ -61,7 +69,8 @@ echo "{\"device_id\": \"$DEVICE_ID\", \"token\": \"$DEVICE_TOKEN\", \"anon_key\"
 echo "Registration successful. Device ID: $DEVICE_ID"
 
 echo "--- 3. Installing OS Dependencies ---"
-sudo apt-get install -y chromium-browser x11-xserver-utils unclutter python3-pip scrot
+# Switched from chromium-browser to firefox-esr
+sudo apt-get install -y firefox-esr x11-xserver-utils unclutter python3-pip scrot
 
 # Install Python Websocket Client for the Agent
 pip3 install websocket-client requests --break-system-packages || pip3 install websocket-client requests
@@ -101,7 +110,8 @@ def on_message(ws, message):
             # Run update in background to not block the socket
             subprocess.Popen(['bash', '-c', 'sudo apt-get update && sudo apt-get upgrade -y'])
         elif command == 'restart-kiosk':
-            subprocess.run(['pkill', 'chromium'])
+            # Kill Firefox
+            subprocess.run(['pkill', 'firefox'])
 
 def on_open(ws):
     config = load_config()
@@ -130,7 +140,7 @@ if __name__ == "__main__":
             time.sleep(10)
 EOF
 
-# Create Systemd Service for the Agent
+# ... (systemd service logic stays the same) ...
 sudo bash -c "cat <<EOF > /etc/systemd/system/farin-agent.service
 [Unit]
 Description=Farin Remote Management Agent
@@ -150,17 +160,39 @@ sudo systemctl daemon-reload
 sudo systemctl enable farin-agent.service
 sudo systemctl start farin-agent.service
 
-echo "--- 5. Configuring Kiosk Autostart ---"
+echo "--- 6. Configuring Kiosk Autostart ---"
 mkdir -p "$USER_HOME/.config/autostart"
+
+# Create a specialized Firefox profile for the Kiosk to disable all prompts
+FF_PROFILE_DIR="$USER_HOME/.mozilla/firefox/farin-kiosk"
+mkdir -p "$FF_PROFILE_DIR"
+cat <<EOF > "$FF_PROFILE_DIR/user.js"
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("browser.startup.page", 1);
+user_pref("browser.startup.homepage", "$PROJECT_URL/tv?token=$DEVICE_TOKEN");
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.tabs.warnOnClose", false);
+user_pref("app.update.auto", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+user_pref("extensions.update.enabled", false);
+EOF
+
+# Update the autostart to use the custom profile and kiosk mode
 cat <<EOF > "$USER_HOME/.config/autostart/kiosk.desktop"
 [Desktop Entry]
 Type=Application
 Name=Farin TV Display
-Exec=bash -c 'sleep 10 && chromium-browser --noerrdialogs --disable-infobars --kiosk "$PROJECT_URL/tv?token=$DEVICE_TOKEN"'
+Exec=firefox --profile "$FF_PROFILE_DIR" --kiosk "$PROJECT_URL/tv?token=$DEVICE_TOKEN"
 EOF
 
-# Disable Screen Blanking
+# Disable Screen Blanking and Keyrings
 cat <<EOF >> "$USER_HOME/.xsessionrc"
+# Disable keyring prompts
+export (gnome_keyring_control=)
+export (gnome_keyring_pid=)
+
 xset s off
 xset fp rehash
 xset -dpms
