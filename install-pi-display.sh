@@ -202,14 +202,25 @@ user_pref("app.update.auto", false);
 user_pref("datareporting.policy.dataSubmissionEnabled", false);
 user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
 user_pref("extensions.update.enabled", false);
+user_pref("browser.low_mem_warning.disabled", true);
+user_pref("browser.tabs.remote.autostart", false);
+user_pref("browser.cache.disk.enable", false);
+user_pref("browser.sessionstore.interval", 3600000);
 EOF
+
+# Bypass the "1GB RAM" warning by calling the Firefox binary directly 
+# instead of the Raspberry Pi OS wrapper script.
+FF_BINARY="/usr/lib/firefox-esr/firefox-esr"
+if [ ! -f "$FF_BINARY" ]; then
+    FF_BINARY="firefox-esr"
+fi
 
 # Update the autostart to use the custom profile and kiosk mode
 cat <<EOF > "$USER_HOME/.config/autostart/kiosk.desktop"
 [Desktop Entry]
 Type=Application
 Name=Farin TV Display
-Exec=firefox --profile "$FF_PROFILE_DIR" --kiosk "$PROJECT_URL/tv?token=$DEVICE_TOKEN"
+Exec=$FF_BINARY --profile "$FF_PROFILE_DIR" --kiosk "$PROJECT_URL/tv?token=$DEVICE_TOKEN"
 EOF
 
 # Disable Screen Blanking and Keyrings
