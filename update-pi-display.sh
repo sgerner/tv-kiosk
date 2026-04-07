@@ -210,5 +210,10 @@ EOF
     fi
 fi
 
+echo "--- 7. Forcing Legacy X11 (Disabling Wayland) ---"
+if command -v raspi-config >/dev/null 2>&1; then
+    sudo raspi-config nonint do_wayland W1 || true
+fi
+
 echo "--- Update Complete ---"
 echo "The agent has been restarted. You can apply the new Openbox bindings and Chromium transition by rebooting: sudo reboot"
