@@ -209,7 +209,7 @@ sudo apt-get install -y \
     jq \
     python3 \
     python3-pip \
-    chromium-browser \
+    chromium \
     x11-xserver-utils \
     unclutter \
     scrot \
@@ -419,7 +419,7 @@ while true; do
     sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
     sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
 
-    chromium-browser \
+    chromium \
         --kiosk \
         --noerrdialogs \
         --disable-infobars \
