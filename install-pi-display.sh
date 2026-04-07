@@ -30,21 +30,36 @@ sudo apt-get update
 sudo apt-get install -y curl jq
 
 # Low-RAM Optimization: Setup ZRAM (Compressed RAM Swap)
-# This prevents SD card wear and is much faster than disk-based swap.
 if [ $(free -m | awk '/^Mem:/{print $2}') -lt 1024 ]; then
     echo "Low RAM detected. Setting up ZRAM for stability and SD card protection..."
-    # Disable and remove traditional SD-based swap
+    
+    # 1. Disable and remove traditional SD-based swap
     sudo dphys-swapfile swapoff || true
-    sudo apt-get purge -y dphys-swapfile
+    sudo apt-get purge -y dphys-swapfile || true
     sudo rm -f /var/swap
 
-    # Install and configure ZRAM
-    sudo apt-get install -y zram-tools
-    echo "PERCENT=60" | sudo tee /etc/default/zramswap
-    sudo systemctl restart zramswap
+    # 2. Ensure zram module is loaded
+    sudo modprobe zram || true
 
-    # Lower swappiness to prefer actual RAM
-    echo "vm.swappiness=10" | sudo tee -a /etc/sysctl.conf
+    # 3. Install zram-tools
+    # We use a subshell to ignore errors during the initial apt install 
+    # as the service might try to start before we configure it.
+    sudo apt-get install -y zram-tools || true
+
+    # 4. Configure ZRAM
+    echo "ALGORITHM=zstd" | sudo tee /etc/default/zramswap
+    echo "PERCENT=60" | sudo tee -a /etc/default/zramswap
+    echo "PRIORITY=100" | sudo tee -a /etc/default/zramswap
+
+    # 5. Try to start/restart the service, but don't fail if it doesn't work yet
+    # (The reboot will pick up the changes anyway)
+    sudo systemctl daemon-reload || true
+    sudo systemctl restart zramswap || echo "Warning: ZRAM will be fully active after the next reboot."
+
+    # 6. Lower swappiness to prefer actual RAM
+    if ! grep -q "vm.swappiness=10" /etc/sysctl.conf; then
+        echo "vm.swappiness=10" | sudo tee -a /etc/sysctl.conf
+    fi
     sudo sysctl -p
 fi
 
