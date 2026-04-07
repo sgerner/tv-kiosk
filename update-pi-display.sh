@@ -134,6 +134,11 @@ sudo apt-get autoremove -y || true
 cat > "$AGENT_DIR/kiosk.sh" <<'EOF'
 #!/bin/bash
 
+# Wait for network and DNS before launching Chromium to prevent the "offline white screen"
+until ping -c 1 farin.app >/dev/null 2>&1; do
+    sleep 2
+done
+
 # Loop forever to restart chromium if it crashes
 while true; do
     # Remove chromium error flags
@@ -145,20 +150,14 @@ while true; do
         --kiosk \
         --noerrdialogs \
         --disable-infobars \
-        --check-for-update-interval=31536000 \
-        --fast \
-        --fast-start \
         --disable-dev-shm-usage \
-        --enable-low-end-device-mode \
-        --num-raster-threads=1 \
         --disable-features=Translate,BlinkGenPropertyTrees,site-per-process \
-        --disable-background-networking \
-        --disable-extensions \
         --disable-sync \
-        --process-per-site \
-        --renderer-process-limit=1 \
         --js-flags="--max-old-space-size=128" \
         --disk-cache-size=33554432 \
+        --autoplay-policy=no-user-gesture-required \
+        --remote-debugging-port=9222 \
+        --remote-debugging-address=0.0.0.0 \
         "$1"
         
     sleep 5
