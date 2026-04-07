@@ -420,6 +420,7 @@ while true; do
     sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
 
     chromium \
+        --no-memcheck \
         --kiosk \
         --noerrdialogs \
         --disable-infobars \
@@ -427,9 +428,15 @@ while true; do
         --fast \
         --fast-start \
         --disable-dev-shm-usage \
-        --disable-features=Translate,BlinkGenPropertyTrees \
+        --enable-low-end-device-mode \
+        --num-raster-threads=1 \
+        --disable-features=Translate,BlinkGenPropertyTrees,site-per-process \
         --disable-background-networking \
-        --js-flags="--max-old-space-size=256" \
+        --disable-extensions \
+        --disable-sync \
+        --process-per-site \
+        --renderer-process-limit=1 \
+        --js-flags="--max-old-space-size=128" \
         --disk-cache-size=33554432 \
         "$1"
         
