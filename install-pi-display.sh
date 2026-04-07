@@ -29,13 +29,23 @@ echo "--- 1. Preparing Environment ---"
 sudo apt-get update
 sudo apt-get install -y curl jq
 
-# Low-RAM Optimization: Increase Swap to 1GB
+# Low-RAM Optimization: Setup ZRAM (Compressed RAM Swap)
+# This prevents SD card wear and is much faster than disk-based swap.
 if [ $(free -m | awk '/^Mem:/{print $2}') -lt 1024 ]; then
-    echo "Low RAM detected. Increasing swap space for stability..."
+    echo "Low RAM detected. Setting up ZRAM for stability and SD card protection..."
+    # Disable and remove traditional SD-based swap
     sudo dphys-swapfile swapoff || true
-    sudo sed -i 's/CONF_SWAPSIZE=.*/CONF_SWAPSIZE=1024/' /etc/dphys-swapfile
-    sudo dphys-swapfile setup
-    sudo dphys-swapfile swapon
+    sudo apt-get purge -y dphys-swapfile
+    sudo rm -f /var/swap
+
+    # Install and configure ZRAM
+    sudo apt-get install -y zram-tools
+    echo "PERCENT=60" | sudo tee /etc/default/zramswap
+    sudo systemctl restart zramswap
+
+    # Lower swappiness to prefer actual RAM
+    echo "vm.swappiness=10" | sudo tee -a /etc/sysctl.conf
+    sudo sysctl -p
 fi
 
 echo "--- 2. Registering Device with Farin Cloud ---"
@@ -190,8 +200,8 @@ EOF
 # Disable Screen Blanking and Keyrings
 cat <<EOF >> "$USER_HOME/.xsessionrc"
 # Disable keyring prompts
-export (gnome_keyring_control=)
-export (gnome_keyring_pid=)
+export GNOME_KEYRING_CONTROL=
+export GNOME_KEYRING_PID=
 
 xset s off
 xset fp rehash
