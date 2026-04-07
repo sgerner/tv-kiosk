@@ -358,7 +358,7 @@ def on_message(ws, message):
         elif command == "rotate-screen":
             direction = payload.get("direction", "normal")
             if direction in ["normal", "inverted", "left", "right"]:
-                subprocess.run(["xrandr", "-display", ":0", "-o", direction], check=False)
+                subprocess.run([f"{os.path.dirname(os.path.abspath(__file__))}/rotate.sh", direction], check=False)
 
 def on_error(ws, error):
     print(f"WebSocket Error: {error}")
@@ -421,7 +421,13 @@ if __name__ == "__main__":
     sys.exit(app.exec())
 EOF
 
-chmod +x "$AGENT_DIR/agent.py" "$AGENT_DIR/kiosk.py"
+cat > "$AGENT_DIR/rotate.sh" <<'EOF'
+#!/bin/sh
+xrandr -display :0 -o "$1"
+echo "$1" > "$HOME/.farin-tv-orientation"
+EOF
+
+chmod +x "$AGENT_DIR/agent.py" "$AGENT_DIR/kiosk.py" "$AGENT_DIR/rotate.sh"
 
 sudo tee /etc/systemd/system/farin-agent.service >/dev/null <<EOF
 [Unit]
@@ -457,11 +463,15 @@ fi
 
 # Inject rotation bindings into the keyboard section
 sudo sed -i '/<keyboard>/a \
-  <keybind key="C-A-Up">\n    <action name="Execute">\n      <command>xrandr -o normal</command>\n    </action>\n  </keybind>\n  <keybind key="C-A-Down">\n    <action name="Execute">\n      <command>xrandr -o inverted</command>\n    </action>\n  </keybind>\n  <keybind key="C-A-Left">\n    <action name="Execute">\n      <command>xrandr -o left</command>\n    </action>\n  </keybind>\n  <keybind key="C-A-Right">\n    <action name="Execute">\n      <command>xrandr -o right</command>\n    </action>\n  </keybind>' "$USER_HOME/.config/openbox/rc.xml"
+  <keybind key="C-A-Up">\n    <action name="Execute">\n      <command>'"$AGENT_DIR"'/rotate.sh normal</command>\n    </action>\n  </keybind>\n  <keybind key="C-A-Down">\n    <action name="Execute">\n      <command>'"$AGENT_DIR"'/rotate.sh inverted</command>\n    </action>\n  </keybind>\n  <keybind key="C-A-Left">\n    <action name="Execute">\n      <command>'"$AGENT_DIR"'/rotate.sh left</command>\n    </action>\n  </keybind>\n  <keybind key="C-A-Right">\n    <action name="Execute">\n      <command>'"$AGENT_DIR"'/rotate.sh right</command>\n    </action>\n  </keybind>' "$USER_HOME/.config/openbox/rc.xml"
 sudo chown "$CURRENT_USER:$CURRENT_USER" "$USER_HOME/.config/openbox/rc.xml"
 
 cat > "$USER_HOME/.xinitrc" <<EOF
 #!/bin/sh
+
+if [ -f "$USER_HOME/.farin-tv-orientation" ]; then
+    xrandr -o "\$(cat "$USER_HOME/.farin-tv-orientation")" || true
+fi
 
 xset s off
 xset -dpms
