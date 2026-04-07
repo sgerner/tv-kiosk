@@ -94,8 +94,8 @@ echo "{\"device_id\": \"$DEVICE_ID\", \"token\": \"$DEVICE_TOKEN\", \"anon_key\"
 echo "Registration successful. Device ID: $DEVICE_ID"
 
 echo "--- 3. Installing OS Dependencies ---"
-# Switched from chromium-browser to firefox-esr
-sudo apt-get install -y firefox-esr x11-xserver-utils unclutter python3-pip scrot
+# Switched from firefox-esr to PyQt6 WebView wrapper for low-RAM stability
+sudo apt-get install -y python3-pyqt6 python3-pyqt6.qtwebengine x11-xserver-utils unclutter python3-pip scrot
 
 # Install Python Websocket Client for the Agent
 pip3 install websocket-client requests --break-system-packages || pip3 install websocket-client requests
@@ -134,9 +134,9 @@ def on_message(ws, message):
         elif command == 'system-update':
             # Run update in background to not block the socket
             subprocess.Popen(['bash', '-c', 'sudo apt-get update && sudo apt-get upgrade -y'])
-        elif command == 'restart-kiosk':
-            # Kill Firefox
-            subprocess.run(['pkill', 'firefox'])
+            elif command == 'restart-kiosk':
+                # Kill the PyQt WebView process
+                subprocess.run(['pkill', '-f', 'kiosk.py'])
 
 def on_open(ws):
     config = load_config()
@@ -185,27 +185,51 @@ sudo systemctl daemon-reload
 sudo systemctl enable farin-agent.service
 sudo systemctl start farin-agent.service
 
-echo "--- 6. Configuring Kiosk Autostart ---"
-mkdir -p "$USER_HOME/.config/autostart"
+echo "--- 6. Setting up Kiosk WebView Wrapper ---"
+mkdir -p "$USER_HOME/farin-agent"
+cat <<<''EOF' > "$USER_HOME/farin-agent/kiosk.py"
+import sys
+import os
+from PyQt6.QtCore import QUrl
+from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtWebEngineWidgets import QWebEngineView
 
-# Create a specialized Firefox profile for the Kiosk to disable all prompts
-FF_PROFILE_DIR="$USER_HOME/.mozilla/firefox/farin-kiosk"
-mkdir -p "$FF_PROFILE_DIR"
-cat <<EOF > "$FF_PROFILE_DIR/user.js"
-user_pref("browser.shell.checkDefaultBrowser", false);
-user_pref("browser.startup.homepage_override.mstone", "ignore");
-user_pref("browser.startup.page", 1);
-user_pref("browser.startup.homepage", "$PROJECT_URL/tv?token=$DEVICE_TOKEN");
-user_pref("browser.sessionstore.resume_from_crash", false);
-user_pref("browser.tabs.warnOnClose", false);
-user_pref("app.update.auto", false);
-user_pref("datareporting.policy.dataSubmissionEnabled", false);
-user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
-user_pref("extensions.update.enabled", false);
-user_pref("browser.low_mem_warning.disabled", true);
-user_pref("browser.tabs.remote.autostart", false);
-user_pref("browser.cache.disk.enable", false);
-user_pref("browser.sessionstore.interval", 3600000);
+class KioskWindow(QMainWindow):
+    def __init__(self, url):
+        super().__init__()
+        self.browser = QWebEngineView()
+        self.browser.setUrl(QUrl(url))
+        self.setCentralWidget(self.browser)
+        self.showFullScreen()
+
+if __name__ == "__main__":
+    if len(sys.argv) <<  2:
+        sys.exit(1)
+    app = QApplication(sys.argv)
+    window = KioskWindow(sys.argv[1])
+    sys.exit(app.exec())
+EOF
+
+# Configure Autostart to use the Python wrapper
+mkdir -p "$USER_HOME/.config/autostart"
+cat <<<EOFEOF > "$USER_HOME/.config/autostart/kiosk.desktop"
+[Desktop Entry]
+Type=Application
+Name=Farin TV Display
+Exec=python3 $USER_HOME/farin-agent/kiosk.py "$PROJECT_URL/tv?token=$DEVICE_TOKEN"
+EOF
+
+# Disable Screen Blanking and Keyrings
+cat <<<EOFEOF >> "$USER_HOME/.xsessionrc"
+# Disable keyring prompts
+export GNOME_KEYRING_CONTROL=
+export GNOME_KEYRING_PID=
+
+xset s off
+xset fp rehash
+xset -dpms
+xset s noblank
+unclutter -idle 0.1 -root &
 EOF
 
 # Bypass the "1GB RAM" warning by calling the Firefox binary directly 
