@@ -42,7 +42,7 @@ def on_message(ws, message):
             )
 
         elif command == "restart-kiosk":
-            subprocess.run(["pkill", "-f", "kiosk.py"], check=False)
+            subprocess.run(["pkill", "-o", "chromium"], check=False)
 
         elif command == "rotate-screen":
             direction = payload.get("direction", "normal")
@@ -125,5 +125,91 @@ fi\
 ' "$USER_HOME/.xinitrc"
 fi
 
+echo "--- 4. Upgrading Kiosk from PyQt6 to Chromium ---"
+sudo apt-get update
+sudo apt-get install -y chromium zram-tools
+sudo apt-get remove -y python3-pyqt6 python3-pyqt6.qtwebengine || true
+sudo apt-get autoremove -y || true
+
+cat > "$AGENT_DIR/kiosk.sh" <<'EOF'
+#!/bin/bash
+
+# Loop forever to restart chromium if it crashes
+while true; do
+    # Remove chromium error flags
+    sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
+    sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
+
+    chromium \
+        --no-memcheck \
+        --kiosk \
+        --noerrdialogs \
+        --disable-infobars \
+        --check-for-update-interval=31536000 \
+        --fast \
+        --fast-start \
+        --disable-dev-shm-usage \
+        --enable-low-end-device-mode \
+        --num-raster-threads=1 \
+        --disable-features=Translate,BlinkGenPropertyTrees,site-per-process \
+        --disable-background-networking \
+        --disable-extensions \
+        --disable-sync \
+        --process-per-site \
+        --renderer-process-limit=1 \
+        --js-flags="--max-old-space-size=128" \
+        --disk-cache-size=33554432 \
+        "$1"
+        
+    sleep 5
+done
+EOF
+
+chmod +x "$AGENT_DIR/kiosk.sh"
+
+echo "--- 5. Upgrading Xinitrc and Autostart to use Chromium ---"
+# Update xinitrc to use kiosk.sh instead of kiosk.py
+sudo sed -i 's/python3 "$AGENT_DIR\/kiosk.py"/"$AGENT_DIR\/kiosk.sh"/g' "$USER_HOME/.xinitrc"
+
+# Update autostart desktop entry
+if [ -f "$USER_HOME/.config/autostart/farin-tv-display.desktop" ]; then
+    sudo sed -i 's/Exec=python3 .*kiosk.py/Exec="$AGENT_DIR\/kiosk.sh"/g' "$USER_HOME/.config/autostart/farin-tv-display.desktop"
+fi
+
+echo "--- 6. Applying Low-RAM Kernel Optimizations ---"
+TOTAL_MEM_MB="$(free -m | awk '/^Mem:/{print $2}')"
+if [[ "${TOTAL_MEM_MB:-0}" -lt 1024 ]]; then
+    sudo dphys-swapfile swapoff || true
+    sudo apt-get purge -y dphys-swapfile || true
+    sudo rm -f /var/swap || true
+
+    sudo modprobe zram || true
+
+    sudo tee /etc/default/zramswap >/dev/null <<'EOF'
+ALGORITHM=zstd
+PERCENT=150
+PRIORITY=100
+EOF
+
+    sudo systemctl daemon-reload || true
+    sudo systemctl restart zramswap || true
+
+    cat <<'EOF' | sudo tee /etc/sysctl.d/99-farin-tv.conf >/dev/null
+vm.swappiness=80
+vm.vfs_cache_pressure=500
+vm.min_free_kbytes=16384
+vm.overcommit_memory=1
+EOF
+    sudo sysctl -p /etc/sysctl.d/99-farin-tv.conf || true
+
+    if grep -q "^gpu_mem=" /boot/config.txt 2>/dev/null; then
+        sudo sed -i 's/^gpu_mem=.*/gpu_mem=64/' /boot/config.txt
+    elif grep -q "^gpu_mem=" /boot/firmware/config.txt 2>/dev/null; then
+        sudo sed -i 's/^gpu_mem=.*/gpu_mem=64/' /boot/firmware/config.txt
+    else
+        echo "gpu_mem=64" | sudo tee -a /boot/config.txt >/dev/null
+    fi
+fi
+
 echo "--- Update Complete ---"
-echo "The agent has been restarted. You can apply the new Openbox bindings by rebooting: sudo reboot"
+echo "The agent has been restarted. You can apply the new Openbox bindings and Chromium transition by rebooting: sudo reboot"
