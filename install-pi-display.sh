@@ -355,6 +355,11 @@ def on_message(ws, message):
         elif command == "restart-kiosk":
             subprocess.run(["pkill", "-f", "kiosk.py"], check=False)
 
+        elif command == "rotate-screen":
+            direction = payload.get("direction", "normal")
+            if direction in ["normal", "inverted", "left", "right"]:
+                subprocess.run(["xrandr", "-display", ":0", "-o", direction], check=False)
+
 def on_error(ws, error):
     print(f"WebSocket Error: {error}")
 
@@ -442,6 +447,18 @@ sudo systemctl enable farin-agent.service
 sudo systemctl restart farin-agent.service
 
 echo "--- 7. Setting up Minimal X/Openbox Kiosk ---"
+
+mkdir -p "$USER_HOME/.config/openbox"
+if [[ -f "/etc/xdg/openbox/rc.xml" ]]; then
+    cp "/etc/xdg/openbox/rc.xml" "$USER_HOME/.config/openbox/rc.xml"
+else
+    echo '<?xml version="1.0" encoding="UTF-8"?><openbox_config><keyboard></keyboard></openbox_config>' > "$USER_HOME/.config/openbox/rc.xml"
+fi
+
+# Inject rotation bindings into the keyboard section
+sudo sed -i '/<keyboard>/a \
+  <keybind key="C-A-Up">\n    <action name="Execute">\n      <command>xrandr -o normal</command>\n    </action>\n  </keybind>\n  <keybind key="C-A-Down">\n    <action name="Execute">\n      <command>xrandr -o inverted</command>\n    </action>\n  </keybind>\n  <keybind key="C-A-Left">\n    <action name="Execute">\n      <command>xrandr -o left</command>\n    </action>\n  </keybind>\n  <keybind key="C-A-Right">\n    <action name="Execute">\n      <command>xrandr -o right</command>\n    </action>\n  </keybind>' "$USER_HOME/.config/openbox/rc.xml"
+sudo chown "$CURRENT_USER:$CURRENT_USER" "$USER_HOME/.config/openbox/rc.xml"
 
 cat > "$USER_HOME/.xinitrc" <<EOF
 #!/bin/sh
