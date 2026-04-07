@@ -42,10 +42,10 @@ prompt_yes_no() {
     local reply
 
     if [[ "$default" == "yes" ]]; then
-        read -r -p "$prompt [Y/n]: " reply || true
+        read -r -p "$prompt [Y/n]: " reply < /dev/tty || true
         reply="${reply:-Y}"
     else
-        read -r -p "$prompt [y/N]: " reply || true
+        read -r -p "$prompt [y/N]: " reply < /dev/tty || true
         reply="${reply:-N}"
     fi
 
@@ -191,10 +191,10 @@ fi
 
 echo "--- 0. Destination Wi-Fi Setup ---"
 if prompt_yes_no "Would you like to save the destination Wi-Fi details now?" "yes"; then
-    read -r -p "Destination Wi-Fi SSID: " WIFI_SSID
-    read -r -s -p "Destination Wi-Fi password: " WIFI_PASSWORD
+    read -r -p "Destination Wi-Fi SSID: " WIFI_SSID < /dev/tty
+    read -r -s -p "Destination Wi-Fi password: " WIFI_PASSWORD < /dev/tty
     echo
-    read -r -p "Wi-Fi country code [$WIFI_COUNTRY]: " WIFI_COUNTRY_INPUT
+    read -r -p "Wi-Fi country code [$WIFI_COUNTRY]: " WIFI_COUNTRY_INPUT < /dev/tty
     WIFI_COUNTRY="${WIFI_COUNTRY_INPUT:-$WIFI_COUNTRY}"
 
     if prompt_yes_no "Switch to that Wi-Fi immediately after saving it?" "no"; then
@@ -247,7 +247,7 @@ EOF
 fi
 
 echo "--- 2. Registering Device with Farin Cloud ---"
-SAFE_HOSTNAME="$(hostname | tr -d '"' | tr -d '\\')"
+SAFE_HOSTNAME="$(hostname | tr -d '"' | tr -d "\\\\")"
 
 if [[ -n "$LOCATION_ID" ]]; then
     JSON_PAYLOAD="$(jq -n \
