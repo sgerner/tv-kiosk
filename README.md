@@ -2,18 +2,6 @@
 
 This repository contains the installation script for Farin TV Display units (Raspberry Pi).
 
-## Quick Setup
-
-1. Create a new public repository on GitHub named `tv-kiosk-setup` (or similar).
-2. Upload the `install-pi-display.sh` file to that repository.
-3. Update the `buildPiScript` function in the main Farin repository (`src/routes/(app)/config/tv-displays/+page.svelte`) to point to your new script:
-
-```javascript
-function buildPiScript(code) {
-    return `curl -sSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/tv-kiosk-setup/main/install-pi-display.sh | bash -s -- --code ${code} --location ${$selectedLocation}`;
-}
-```
-
 ## How to use on a Raspberry Pi
 
 1. Flash **Raspberry Pi OS (64-bit)** to a microSD card.
