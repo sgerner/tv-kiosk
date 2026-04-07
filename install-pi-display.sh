@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Farin TV Display "Zero-Touch" Setup Script
-# Usage: curl -sSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/install-pi-display.sh | bash -s -- --code <CODE> --location <ID>
+# Usage: curl -sSL https://raw.githubusercontent.com/sgerner/tv-kiosk/main/install-pi-display.sh | bash -s -- --code <CODE> --location <ID>
 
 set -e
 
@@ -25,7 +25,11 @@ done
 
 if [ -z "$SETUP_CODE" ]; then echo "Error: --code required."; exit 1; fi
 
-echo "--- 1. Registering Device with Farin Cloud ---"
+echo "--- 1. Preparing Environment ---"
+sudo apt-get update
+sudo apt-get install -y curl jq
+
+echo "--- 2. Registering Device with Farin Cloud ---"
 # Call the setup API directly from the script
 RESPONSE=$(curl -s -X POST "$API_URL" \
   -H "Content-Type: application/json" \
@@ -43,20 +47,19 @@ fi
 echo "{\"device_id\": \"$DEVICE_ID\", \"token\": \"$DEVICE_TOKEN\", \"anon_key\": \"$ANON_KEY\", \"ws_url\": \"$SUPABASE_WS_URL\"}" > "$CONFIG_FILE"
 echo "Registration successful. Device ID: $DEVICE_ID"
 
-echo "--- 2. Installing OS Dependencies ---"
-sudo apt-get update
-sudo apt-get install -y chromium-browser x11-xserver-utils unclutter curl jq python3-pip scrot
+echo "--- 3. Installing OS Dependencies ---"
+sudo apt-get install -y chromium-browser x11-xserver-utils unclutter python3-pip scrot
 
 # Install Python Websocket Client for the Agent
 pip3 install websocket-client requests --break-system-packages || pip3 install websocket-client requests
 
-echo "--- 3. Installing Tailscale ---"
+echo "--- 4. Installing Tailscale ---"
 if ! command -v tailscale &> /dev/null; then
     curl -fsSL https://tailscale.com/install.sh | sh
     echo "Tailscale installed. Remember to run 'sudo tailscale up' later."
 fi
 
-echo "--- 4. Setting up Remote Management Agent ---"
+echo "--- 5. Setting up Remote Management Agent ---"
 mkdir -p "$USER_HOME/farin-agent"
 cat <<'EOF' > "$USER_HOME/farin-agent/agent.py"
 import json
