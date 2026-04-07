@@ -30,16 +30,29 @@ sudo apt-get update
 sudo apt-get install -y curl jq
 
 echo "--- 2. Registering Device with Farin Cloud ---"
+# Escape hostname for JSON
+SAFE_HOSTNAME=$(hostname | tr -d '"' | tr -d '\\')
+
 # Call the setup API directly from the script
-RESPONSE=$(curl -s -X POST "$API_URL" \
+RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$API_URL" \
   -H "Content-Type: application/json" \
-  -d "{\"code\": \"$SETUP_CODE\", \"nickname\": \"Raspberry Pi ($(hostname))\"}")
+  -d "{\"code\": \"$SETUP_CODE\", \"nickname\": \"Raspberry Pi ($SAFE_HOSTNAME)\"}")
 
-DEVICE_ID=$(echo "$RESPONSE" | jq -r '.device.id')
-DEVICE_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+HTTP_STATUS=$(echo "$RESPONSE" | tail -n 1)
+BODY=$(echo "$RESPONSE" | sed '$d')
 
-if [ "$DEVICE_ID" == "null" ] || [ -z "$DEVICE_ID" ]; then
-    echo "Error: Registration failed. Response: $RESPONSE"
+if [ "$HTTP_STATUS" -ne 200 ]; then
+    echo "Error: Registration failed with status $HTTP_STATUS"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+DEVICE_ID=$(echo "$BODY" | jq -r '.device.id // empty')
+DEVICE_TOKEN=$(echo "$BODY" | jq -r '.token // empty')
+
+if [ -z "$DEVICE_ID" ] || [ "$DEVICE_ID" == "null" ]; then
+    echo "Error: Could not parse Device ID from response."
+    echo "Full Response: $BODY"
     exit 1
 fi
 
