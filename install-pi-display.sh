@@ -209,8 +209,7 @@ sudo apt-get install -y \
     jq \
     python3 \
     python3-pip \
-    python3-pyqt6 \
-    python3-pyqt6.qtwebengine \
+    chromium-browser \
     x11-xserver-utils \
     unclutter \
     scrot \
@@ -233,17 +232,30 @@ if [[ "${TOTAL_MEM_MB:-0}" -lt 1024 ]]; then
 
     sudo tee /etc/default/zramswap >/dev/null <<'EOF'
 ALGORITHM=zstd
-PERCENT=60
+PERCENT=150
 PRIORITY=100
 EOF
 
     sudo systemctl daemon-reload || true
     sudo systemctl restart zramswap || echo "Warning: ZRAM may not be fully active until after reboot."
 
-    if ! grep -q '^vm\.swappiness=10$' /etc/sysctl.conf; then
-        echo "vm.swappiness=10" | sudo tee -a /etc/sysctl.conf >/dev/null
+    # Aggressive kernel memory management for 512MB Pi
+    cat <<'EOF' | sudo tee /etc/sysctl.d/99-farin-tv.conf >/dev/null
+vm.swappiness=80
+vm.vfs_cache_pressure=500
+vm.min_free_kbytes=16384
+vm.overcommit_memory=1
+EOF
+    sudo sysctl -p /etc/sysctl.d/99-farin-tv.conf || true
+
+    # Reduce GPU RAM allocation on 512MB systems since we only need basic 2D drawing
+    if grep -q "^gpu_mem=" /boot/config.txt 2>/dev/null; then
+        sudo sed -i 's/^gpu_mem=.*/gpu_mem=64/' /boot/config.txt
+    elif grep -q "^gpu_mem=" /boot/firmware/config.txt 2>/dev/null; then
+        sudo sed -i 's/^gpu_mem=.*/gpu_mem=64/' /boot/firmware/config.txt
+    else
+        echo "gpu_mem=64" | sudo tee -a /boot/config.txt >/dev/null
     fi
-    sudo sysctl -p || true
 fi
 
 echo "--- 2. Registering Device with Farin Cloud ---"
@@ -353,7 +365,7 @@ def on_message(ws, message):
             )
 
         elif command == "restart-kiosk":
-            subprocess.run(["pkill", "-f", "kiosk.py"], check=False)
+            subprocess.run(["pkill", "-o", "chromium"], check=False)
 
         elif command == "rotate-screen":
             direction = payload.get("direction", "normal")
@@ -398,36 +410,34 @@ if __name__ == "__main__":
             time.sleep(10)
 EOF
 
-cat > "$AGENT_DIR/kiosk.py" <<'EOF'
-import sys
-from PyQt6.QtCore import QUrl
-from PyQt6.QtWidgets import QApplication, QMainWindow
-from PyQt6.QtWebEngineWidgets import QWebEngineView
+cat > "$AGENT_DIR/kiosk.sh" <<'EOF'
+#!/bin/bash
 
-class KioskWindow(QMainWindow):
-    def __init__(self, url):
-        super().__init__()
-        self.browser = QWebEngineView()
-        self.browser.setUrl(QUrl(url))
-        self.setCentralWidget(self.browser)
-        self.showFullScreen()
+# Loop forever to restart chromium if it crashes
+while true; do
+    # Remove chromium error flags
+    sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
+    sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        sys.exit(1)
-
-    app = QApplication(sys.argv)
-    window = KioskWindow(sys.argv[1])
-    sys.exit(app.exec())
+    chromium-browser \
+        --kiosk \
+        --noerrdialogs \
+        --disable-infobars \
+        --check-for-update-interval=31536000 \
+        --fast \
+        --fast-start \
+        --disable-dev-shm-usage \
+        --disable-features=Translate,BlinkGenPropertyTrees \
+        --disable-background-networking \
+        --js-flags="--max-old-space-size=256" \
+        --disk-cache-size=33554432 \
+        "$1"
+        
+    sleep 5
+done
 EOF
 
-cat > "$AGENT_DIR/rotate.sh" <<'EOF'
-#!/bin/sh
-xrandr -display :0 -o "$1"
-echo "$1" > "$HOME/.farin-tv-orientation"
-EOF
-
-chmod +x "$AGENT_DIR/agent.py" "$AGENT_DIR/kiosk.py" "$AGENT_DIR/rotate.sh"
+chmod +x "$AGENT_DIR/agent.py" "$AGENT_DIR/kiosk.sh" "$AGENT_DIR/rotate.sh"
 
 sudo tee /etc/systemd/system/farin-agent.service >/dev/null <<EOF
 [Unit]
@@ -480,7 +490,7 @@ unclutter -idle 0.1 -root &
 
 openbox-session &
 
-exec python3 "$AGENT_DIR/kiosk.py" "$PROJECT_URL/tv?token=$DEVICE_TOKEN"
+exec "$AGENT_DIR/kiosk.sh" "$PROJECT_URL/tv?token=$DEVICE_TOKEN"
 EOF
 
 chmod +x "$USER_HOME/.xinitrc"
@@ -507,7 +517,7 @@ cat > "$USER_HOME/.config/autostart/farin-tv-display.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Farin TV Display
-Exec=python3 $AGENT_DIR/kiosk.py "$PROJECT_URL/tv?token=$DEVICE_TOKEN"
+Exec="$AGENT_DIR/kiosk.sh" "$PROJECT_URL/tv?token=$DEVICE_TOKEN"
 X-GNOME-Autostart-enabled=true
 EOF
 
