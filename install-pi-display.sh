@@ -256,6 +256,14 @@ EOF
     else
         echo "gpu_mem=64" | sudo tee -a /boot/config.txt >/dev/null
     fi
+
+    # Permanently disable the annoying "less than 1GB RAM" popup injected by the Pi wrapper script
+    if [[ -f "/usr/bin/chromium-browser" ]]; then
+        sudo sed -i 's/want_memcheck=1/want_memcheck=0/g' /usr/bin/chromium-browser || true
+    fi
+    if [[ -f "/usr/bin/chromium" ]]; then
+        sudo sed -i 's/want_memcheck=1/want_memcheck=0/g' /usr/bin/chromium || true
+    fi
 fi
 
 echo "--- 2. Registering Device with Farin Cloud ---"
@@ -429,6 +437,8 @@ while true; do
         --kiosk \
         --noerrdialogs \
         --disable-infobars \
+        --no-first-run \
+        --password-store=basic \
         --disable-dev-shm-usage \
         --disable-features=Translate,BlinkGenPropertyTrees,site-per-process \
         --disable-sync \
