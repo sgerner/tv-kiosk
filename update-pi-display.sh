@@ -7,6 +7,9 @@ set -euo pipefail
 CURRENT_USER="$(whoami)"
 USER_HOME="$(getent passwd "$CURRENT_USER" | cut -d: -f6)"
 AGENT_DIR="$USER_HOME/farin-agent"
+CONFIG_FILE="$USER_HOME/.farin-tv-config.json"
+PROJECT_URL="https://farin.app"
+DEVICE_TOKEN="$(jq -r '.token // empty' "$CONFIG_FILE" 2>/dev/null || true)"
 
 echo "--- 1. Updating Remote Management Agent ---"
 
@@ -133,9 +136,17 @@ sudo apt-get autoremove -y || true
 
 cat > "$AGENT_DIR/kiosk.sh" <<'EOF'
 #!/bin/bash
+set -u
+
+LOG_DIR="$HOME/.local/state/farin-tv"
+LOG_FILE="$LOG_DIR/kiosk.log"
+mkdir -p "$LOG_DIR"
+
+URL="${1:-https://farin.app/tv}"
 
 # Wait for network and DNS before launching Chromium to prevent the "offline white screen"
 until ping -c 1 farin.app >/dev/null 2>&1; do
+    echo "$(date -Is) waiting for farin.app DNS/network" >> "$LOG_FILE"
     sleep 2
 done
 
@@ -145,8 +156,11 @@ while true; do
     sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
     sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
 
-    chromium \
+    echo "$(date -Is) launching chromium for $URL" >> "$LOG_FILE"
+
+    /usr/bin/chromium \
         --no-memcheck \
+        --no-sandbox \
         --kiosk \
         --noerrdialogs \
         --disable-infobars \
@@ -158,10 +172,13 @@ while true; do
         --js-flags="--max-old-space-size=128" \
         --disk-cache-size=33554432 \
         --autoplay-policy=no-user-gesture-required \
+        --enable-logging=stderr \
+        --v=1 \
         --remote-debugging-port=9222 \
         --remote-debugging-address=0.0.0.0 \
-        "$1"
-        
+        "$URL" >> "$LOG_FILE" 2>&1
+
+    echo "$(date -Is) chromium exited with code $?" >> "$LOG_FILE"
     sleep 5
 done
 EOF
@@ -169,13 +186,30 @@ EOF
 chmod +x "$AGENT_DIR/kiosk.sh"
 
 echo "--- 5. Upgrading Xinitrc and Autostart to use Chromium ---"
-# Update xinitrc to use kiosk.sh instead of kiosk.py
-sudo sed -i 's/python3 "$AGENT_DIR\/kiosk.py"/"$AGENT_DIR\/kiosk.sh"/g' "$USER_HOME/.xinitrc"
+if [[ -n "$DEVICE_TOKEN" ]]; then
+    cat > "$USER_HOME/.xinitrc" <<EOF
+#!/bin/sh
 
-# Update autostart desktop entry
-if [ -f "$USER_HOME/.config/autostart/farin-tv-display.desktop" ]; then
-    sudo sed -i 's/Exec=python3 .*kiosk.py/Exec="$AGENT_DIR\/kiosk.sh"/g' "$USER_HOME/.config/autostart/farin-tv-display.desktop"
+if [ -f "$USER_HOME/.farin-tv-orientation" ]; then
+    xrandr -o "\$(cat "$USER_HOME/.farin-tv-orientation")" || true
 fi
+
+xset s off
+xset -dpms
+xset s noblank
+unclutter -idle 0.1 -root &
+
+openbox-session &
+
+exec "$AGENT_DIR/kiosk.sh" "$PROJECT_URL/tv?token=$DEVICE_TOKEN"
+EOF
+    chmod +x "$USER_HOME/.xinitrc"
+else
+    echo "Warning: could not read device token from $CONFIG_FILE, leaving .xinitrc unchanged."
+fi
+
+mkdir -p "$USER_HOME/.config/autostart"
+rm -f "$USER_HOME/.config/autostart/farin-tv-display.desktop"
 
 echo "--- 6. Applying Low-RAM Kernel Optimizations ---"
 TOTAL_MEM_MB="$(free -m | awk '/^Mem:/{print $2}')"
