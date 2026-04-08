@@ -420,9 +420,17 @@ EOF
 
 cat > "$AGENT_DIR/kiosk.sh" <<'EOF'
 #!/bin/bash
+set -u
+
+LOG_DIR="$HOME/.local/state/farin-tv"
+LOG_FILE="$LOG_DIR/kiosk.log"
+mkdir -p "$LOG_DIR"
+
+URL="${1:-https://farin.app/tv}"
 
 # Wait for network and DNS before launching Chromium to prevent the "offline white screen"
 until ping -c 1 farin.app >/dev/null 2>&1; do
+    echo "$(date -Is) waiting for farin.app DNS/network" >> "$LOG_FILE"
     sleep 2
 done
 
@@ -432,8 +440,11 @@ while true; do
     sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
     sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
 
-    chromium \
+    echo "$(date -Is) launching chromium for $URL" >> "$LOG_FILE"
+
+    /usr/bin/chromium \
         --no-memcheck \
+        --no-sandbox \
         --kiosk \
         --noerrdialogs \
         --disable-infobars \
@@ -445,10 +456,13 @@ while true; do
         --js-flags="--max-old-space-size=128" \
         --disk-cache-size=33554432 \
         --autoplay-policy=no-user-gesture-required \
+        --enable-logging=stderr \
+        --v=1 \
         --remote-debugging-port=9222 \
         --remote-debugging-address=0.0.0.0 \
-        "$1"
-        
+        "$URL" >> "$LOG_FILE" 2>&1
+
+    echo "$(date -Is) chromium exited with code $?" >> "$LOG_FILE"
     sleep 5
 done
 EOF
@@ -529,13 +543,7 @@ unclutter -idle 0.1 -root &
 EOF
 
 mkdir -p "$USER_HOME/.config/autostart"
-cat > "$USER_HOME/.config/autostart/farin-tv-display.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Farin TV Display
-Exec="$AGENT_DIR/kiosk.sh" "$PROJECT_URL/tv?token=$DEVICE_TOKEN"
-X-GNOME-Autostart-enabled=true
-EOF
+rm -f "$USER_HOME/.config/autostart/farin-tv-display.desktop"
 
 if command -v raspi-config >/dev/null 2>&1; then
     # Disable Wayland and force legacy X11 for Openbox compatibility
