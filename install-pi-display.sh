@@ -236,14 +236,18 @@ PERCENT=150
 PRIORITY=100
 EOF
 
-    sudo systemctl daemon-reload || true
-    sudo systemctl restart zramswap || echo "Warning: ZRAM may not be fully active until after reboot."
+    if systemctl is-active --quiet zramswap; then
+        echo "ZRAM swap already active; keeping the existing instance."
+    else
+        sudo systemctl daemon-reload || true
+        sudo systemctl enable --now zramswap || echo "Warning: ZRAM may not be fully active until after reboot."
+    fi
 
-    # Aggressive kernel memory management for 512MB Pi
+    # Moderate kernel memory management for 512MB Pi
     cat <<'EOF' | sudo tee /etc/sysctl.d/99-farin-tv.conf >/dev/null
-vm.swappiness=80
-vm.vfs_cache_pressure=500
-vm.min_free_kbytes=16384
+vm.swappiness=60
+vm.vfs_cache_pressure=150
+vm.min_free_kbytes=12288
 vm.overcommit_memory=1
 EOF
     sudo sysctl -p /etc/sysctl.d/99-farin-tv.conf || true
@@ -318,6 +322,7 @@ cat > "$CONFIG_FILE" <<EOF
 {
   "device_id": "$DEVICE_ID",
   "token": "$DEVICE_TOKEN",
+  "project_url": "$PROJECT_URL",
   "anon_key": "$ANON_KEY",
   "ws_url": "$SUPABASE_WS_URL"
 }
@@ -330,9 +335,8 @@ echo "Registration successful. Device ID: $DEVICE_ID"
 echo "--- 3. Saving Destination Wi-Fi ---"
 configure_wifi "$WIFI_SSID" "$WIFI_PASSWORD" "$WIFI_COUNTRY" "$APPLY_WIFI_NOW"
 
-echo "--- 4. Installing Python Dependencies ---"
-python3 -m pip install --break-system-packages websocket-client requests || \
-python3 -m pip install --user websocket-client requests
+echo "--- 4. Python Runtime Ready ---"
+python3 --version
 
 echo "--- 5. Installing Tailscale ---"
 if ! command -v tailscale >/dev/null 2>&1; then
@@ -345,22 +349,82 @@ cat > "$AGENT_DIR/agent.py" <<'EOF'
 import json
 import os
 import subprocess
+import sys
+import threading
 import time
+import urllib.error
+import urllib.request
 import websocket
 
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 CONFIG_PATH = os.path.expanduser("~/.farin-tv-config.json")
+AGENT_VERSION = "2026-04-08-http-poll"
+HEARTBEAT_INTERVAL_SECONDS = 25
+_running = True
+
 
 def load_config():
     with open(CONFIG_PATH, "r") as f:
         return json.load(f)
 
+def project_url(config):
+    return str(config.get("project_url") or "https://farin.app").rstrip("/")
+
+
+def auth_headers(config):
+    return {
+        "Authorization": f"Bearer {config['token']}",
+        "Content-Type": "application/json",
+        "X-Farin-Agent-Version": AGENT_VERSION,
+    }
+
+
+def command_endpoint(config):
+    return f"{project_url(config)}/api/tv/command"
+
+def http_json(url, headers, method="GET", payload=None, timeout=20):
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def normalize_message(raw_message):
+    data = json.loads(raw_message)
+    if isinstance(data, list) and len(data) == 5:
+        return {
+            "join_ref": data[0],
+            "ref": data[1],
+            "topic": data[2],
+            "event": data[3],
+            "payload": data[4],
+        }
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
 def on_message(ws, message):
-    data = json.loads(message)
+    data = normalize_message(message)
+
+    if data.get("event") == "phx_reply":
+        payload = data.get("payload", {})
+        status = payload.get("status")
+        response = payload.get("response")
+        if status:
+            print(f"Realtime join status: {status} response={response}", flush=True)
 
     if data.get("event") == "broadcast" and data.get("payload", {}).get("event") == "command":
         payload = data["payload"].get("payload", {})
         command = payload.get("command")
-        print(f"Executing Remote Command: {command}")
+        print(f"Executing Remote Command: {command}", flush=True)
 
         if command == "reboot":
             subprocess.run(["sudo", "reboot"], check=False)
@@ -380,34 +444,69 @@ def on_message(ws, message):
             if direction in ["normal", "inverted", "left", "right"]:
                 subprocess.run([f"{os.path.dirname(os.path.abspath(__file__))}/rotate.sh", direction], check=False)
 
+
 def on_error(ws, error):
-    print(f"WebSocket Error: {error}")
+    print(f"WebSocket Error: {error}", flush=True)
+
 
 def on_close(ws, close_status_code, close_msg):
-    print(f"WebSocket closed: {close_status_code} {close_msg}")
+    global _running
+    _running = False
+    print(f"WebSocket closed: {close_status_code} {close_msg}", flush=True)
+
+
+def send_heartbeat(ws):
+    ref = 1
+    while _running and ws.keep_running:
+        time.sleep(HEARTBEAT_INTERVAL_SECONDS)
+        try:
+            heartbeat_msg = [None, str(ref), "phoenix", "heartbeat", {}]
+            ws.send(json.dumps(heartbeat_msg))
+            print("Realtime heartbeat sent", flush=True)
+            ref += 1
+        except Exception as exc:
+            print(f"Heartbeat send failed: {exc}", flush=True)
+            break
+
 
 def on_open(ws):
+    global _running
+    _running = True
     config = load_config()
-    subscribe_msg = {
-        "topic": f"tv_device:{config['device_id']}",
-        "event": "phx_join",
-        "payload": {},
-        "ref": "1",
-    }
+    subscribe_msg = [
+        None,
+        "1",
+        f"realtime:tv_device:{config['device_id']}",
+        "phx_join",
+        {
+            "config": {
+                "broadcast": {"ack": False, "self": False},
+                "presence": {"enabled": False, "key": ""},
+                "postgres_changes": [],
+                "private": False,
+            }
+        },
+    ]
+    print(f"Joining realtime channel realtime:tv_device:{config['device_id']}", flush=True)
     ws.send(json.dumps(subscribe_msg))
+    threading.Thread(target=send_heartbeat, args=(ws,), daemon=True).start()
+
 
 def run():
-    config = load_config()
-    ws_url = f"{config['ws_url']}?apikey={config['anon_key']}&vsn=1.0.0"
+    try:
+        config = load_config()
+        ws_url = f"{config['ws_url']}?apikey={config['anon_key']}&vsn=1.0.0"
 
-    ws = websocket.WebSocketApp(
-        ws_url,
-        on_message=on_message,
-        on_open=on_open,
-        on_error=on_error,
-        on_close=on_close,
-    )
-    ws.run_forever()
+        ws = websocket.WebSocketApp(
+            ws_url,
+            on_message=on_message,
+            on_open=on_open,
+            on_error=on_error,
+            on_close=on_close,
+        )
+        ws.run_forever(ping_interval=30, ping_timeout=10)
+    except Exception as exc:
+        print(f"Agent Error: {exc}. Retrying in 10s...")
 
 if __name__ == "__main__":
     while True:
@@ -422,49 +521,81 @@ cat > "$AGENT_DIR/kiosk.sh" <<'EOF'
 #!/bin/bash
 set -u
 
-LOG_DIR="$HOME/.local/state/farin-tv"
-LOG_FILE="$LOG_DIR/kiosk.log"
-mkdir -p "$LOG_DIR"
+PROFILE_DIR="$HOME/.config/farin-tv/chromium-profile"
+mkdir -p "$PROFILE_DIR"
 
 URL="${1:-https://farin.app/tv}"
 
 # Wait for network and DNS before launching Chromium to prevent the "offline white screen"
 until ping -c 1 farin.app >/dev/null 2>&1; do
-    echo "$(date -Is) waiting for farin.app DNS/network" >> "$LOG_FILE"
+    echo "$(date -Is) waiting for farin.app DNS/network"
     sleep 2
 done
 
 # Loop forever to restart chromium if it crashes
 while true; do
     # Remove chromium error flags
-    sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
-    sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
+    sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
+    sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
 
-    echo "$(date -Is) launching chromium for $URL" >> "$LOG_FILE"
+    echo "$(date -Is) launching chromium for $URL"
 
     /usr/bin/chromium \
         --no-memcheck \
         --no-sandbox \
+        --user-data-dir="$PROFILE_DIR" \
         --kiosk \
         --noerrdialogs \
         --disable-infobars \
         --no-first-run \
+        --disable-session-crashed-bubble \
+        --disable-restore-session-state \
         --password-store=basic \
+        --disable-background-networking \
+        --disable-component-update \
+        --disable-default-apps \
+        --disable-domain-reliability \
         --disable-dev-shm-usage \
-        --disable-features=Translate,BlinkGenPropertyTrees,site-per-process \
+        --disable-features=Translate,BlinkGenPropertyTrees,site-per-process,MediaRouter,OptimizationHints \
         --disable-sync \
         --js-flags="--max-old-space-size=128" \
         --disk-cache-size=33554432 \
         --autoplay-policy=no-user-gesture-required \
-        --enable-logging=stderr \
-        --v=1 \
-        --remote-debugging-port=9222 \
-        --remote-debugging-address=0.0.0.0 \
-        "$URL" >> "$LOG_FILE" 2>&1
+        "$URL"
 
-    echo "$(date -Is) chromium exited with code $?" >> "$LOG_FILE"
+    echo "$(date -Is) chromium exited with code $?"
     sleep 5
 done
+EOF
+
+cat > "$AGENT_DIR/rotate.sh" <<'EOF'
+#!/bin/sh
+set -eu
+
+DIRECTION="${1:-normal}"
+DISPLAY_VALUE="${DISPLAY:-:0}"
+XAUTHORITY_VALUE="${XAUTHORITY:-$HOME/.Xauthority}"
+
+case "$DIRECTION" in
+    normal|inverted|left|right) ;;
+    *)
+        echo "Invalid rotation direction: $DIRECTION" >&2
+        exit 1
+        ;;
+esac
+
+if [ ! -f "$XAUTHORITY_VALUE" ]; then
+    echo "Missing Xauthority file: $XAUTHORITY_VALUE" >&2
+    exit 1
+fi
+
+if ! DISPLAY="$DISPLAY_VALUE" XAUTHORITY="$XAUTHORITY_VALUE" xrandr -q >/dev/null 2>&1; then
+    echo "Unable to query X display $DISPLAY_VALUE with XAUTHORITY=$XAUTHORITY_VALUE" >&2
+    exit 1
+fi
+
+DISPLAY="$DISPLAY_VALUE" XAUTHORITY="$XAUTHORITY_VALUE" xrandr -o "$DIRECTION"
+printf '%s\n' "$DIRECTION" > "$HOME/.farin-tv-orientation"
 EOF
 
 chmod +x "$AGENT_DIR/agent.py" "$AGENT_DIR/kiosk.sh" "$AGENT_DIR/rotate.sh"
@@ -477,12 +608,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 $AGENT_DIR/agent.py
+ExecStart=/usr/bin/python3 -u $AGENT_DIR/agent.py
 WorkingDirectory=$AGENT_DIR
 Restart=always
 RestartSec=5
 User=$CURRENT_USER
 Environment=HOME=$USER_HOME
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
@@ -543,7 +675,11 @@ unclutter -idle 0.1 -root &
 EOF
 
 mkdir -p "$USER_HOME/.config/autostart"
-rm -f "$USER_HOME/.config/autostart/farin-tv-display.desktop"
+rm -f \
+    "$USER_HOME/.config/autostart/farin-tv-display.desktop" \
+    "$USER_HOME/.config/autostart/kiosk.desktop" \
+    "$USER_HOME/.config/autostart/chromium.desktop" \
+    "$USER_HOME/.config/autostart/firefox.desktop"
 
 if command -v raspi-config >/dev/null 2>&1; then
     # Disable Wayland and force legacy X11 for Openbox compatibility
