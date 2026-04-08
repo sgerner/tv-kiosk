@@ -13,78 +13,132 @@ DEVICE_TOKEN="$(jq -r '.token // empty' "$CONFIG_FILE" 2>/dev/null || true)"
 
 echo "--- 1. Updating Remote Management Agent ---"
 
+if [[ -f "$CONFIG_FILE" ]]; then
+    TMP_CONFIG="$(mktemp)"
+    jq --arg project_url "$PROJECT_URL" '.project_url = $project_url' "$CONFIG_FILE" > "$TMP_CONFIG"
+    mv "$TMP_CONFIG" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+fi
+
 cat > "$AGENT_DIR/agent.py" <<'EOF'
 import json
 import os
 import subprocess
+import sys
 import time
-import websocket
+import urllib.error
+import urllib.request
+
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 CONFIG_PATH = os.path.expanduser("~/.farin-tv-config.json")
+AGENT_VERSION = "2026-04-08-http-poll"
+POLL_INTERVAL_SECONDS = 5
+
 
 def load_config():
     with open(CONFIG_PATH, "r") as f:
         return json.load(f)
 
-def on_message(ws, message):
-    data = json.loads(message)
+def normalize_rotation(value):
+    rotation = str(value or "").strip().lower()
+    return rotation if rotation in ["normal", "inverted", "left", "right"] else "normal"
 
-    if data.get("event") == "broadcast" and data.get("payload", {}).get("event") == "command":
-        payload = data["payload"].get("payload", {})
-        command = payload.get("command")
-        print(f"Executing Remote Command: {command}")
+def project_url(config):
+    return str(config.get("project_url") or "https://farin.app").rstrip("/")
 
-        if command == "reboot":
-            subprocess.run(["sudo", "reboot"], check=False)
 
-        elif command == "system-update":
-            subprocess.Popen(
-                ["bash", "-lc", "sudo apt-get update && sudo apt-get upgrade -y"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-        elif command == "restart-kiosk":
-            subprocess.run(["pkill", "-o", "chromium"], check=False)
-
-        elif command == "rotate-screen":
-            direction = payload.get("direction", "normal")
-            if direction in ["normal", "inverted", "left", "right"]:
-                subprocess.run([f"{os.path.dirname(os.path.abspath(__file__))}/rotate.sh", direction], check=False)
-
-def on_error(ws, error):
-    print(f"WebSocket Error: {error}")
-
-def on_close(ws, close_status_code, close_msg):
-    print(f"WebSocket closed: {close_status_code} {close_msg}")
-
-def on_open(ws):
-    config = load_config()
-    subscribe_msg = {
-        "topic": f"tv_device:{config['device_id']}",
-        "event": "phx_join",
-        "payload": {},
-        "ref": "1",
+def auth_headers(config):
+    return {
+        "Authorization": f"Bearer {config['token']}",
+        "Content-Type": "application/json",
+        "X-Farin-Agent-Version": AGENT_VERSION,
     }
-    ws.send(json.dumps(subscribe_msg))
 
-def run():
-    config = load_config()
-    ws_url = f"{config['ws_url']}?apikey={config['anon_key']}&vsn=1.0.0"
 
-    ws = websocket.WebSocketApp(
-        ws_url,
-        on_message=on_message,
-        on_open=on_open,
-        on_error=on_error,
-        on_close=on_close,
-    )
-    ws.run_forever()
+def command_endpoint(config):
+    return f"{project_url(config)}/api/tv/command"
+
+
+def http_json(url, headers, method="GET", payload=None, timeout=20):
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_command(config):
+    try:
+        return http_json(command_endpoint(config), auth_headers(config))
+    except urllib.error.HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        print(f"Command poll failed: HTTP {exc.code} {details}", flush=True)
+    except Exception as exc:
+        print(f"Command poll failed: {exc}", flush=True)
+    return {"command": None}
+
+
+def ack_command(config, requested_at):
+    if not requested_at:
+        return
+    try:
+        http_json(
+            command_endpoint(config),
+            auth_headers(config),
+            method="POST",
+            payload={"requested_at": requested_at},
+        )
+        print(f"Command acknowledged: {requested_at}", flush=True)
+    except urllib.error.HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        print(f"Command ack failed: HTTP {exc.code} {details}", flush=True)
+    except Exception as exc:
+        print(f"Command ack failed: {exc}", flush=True)
+
+
+def execute_command(command, payload):
+    print(f"Executing Remote Command: {command}", flush=True)
+    if command == "reboot":
+        subprocess.Popen(["sudo", "reboot"])
+        return True
+    if command == "system-update":
+        subprocess.Popen(
+            ["bash", "-lc", "sudo apt-get update && sudo apt-get upgrade -y"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    if command == "restart-kiosk":
+        subprocess.run(["pkill", "-o", "chromium"], check=False)
+        return True
+    if command == "rotate-screen":
+        direction = str((payload or {}).get("direction") or "normal").lower()
+        if direction in ["normal", "inverted", "left", "right"]:
+            subprocess.run([f"{os.path.dirname(os.path.abspath(__file__))}/rotate.sh", direction], check=False)
+            return True
+        print(f"Ignoring invalid rotation direction: {direction}", flush=True)
+        return False
+    print(f"Ignoring unsupported command: {command}", flush=True)
+    return False
 
 if __name__ == "__main__":
     while True:
         try:
-            run()
+            config = load_config()
+            result = fetch_command(config)
+            command = result.get("command")
+            requested_at = result.get("requested_at")
+            payload = result.get("payload") or {}
+            if command and requested_at:
+                if execute_command(command, payload):
+                    ack_command(config, requested_at)
+            time.sleep(POLL_INTERVAL_SECONDS)
         except Exception as e:
             print(f"Agent Error: {e}. Retrying in 10s...")
             time.sleep(10)
@@ -92,8 +146,32 @@ EOF
 
 cat > "$AGENT_DIR/rotate.sh" <<'EOF'
 #!/bin/sh
-xrandr -display :0 -o "$1"
-echo "$1" > "$HOME/.farin-tv-orientation"
+set -eu
+
+DIRECTION="${1:-normal}"
+DISPLAY_VALUE="${DISPLAY:-:0}"
+XAUTHORITY_VALUE="${XAUTHORITY:-$HOME/.Xauthority}"
+
+case "$DIRECTION" in
+    normal|inverted|left|right) ;;
+    *)
+        echo "Invalid rotation direction: $DIRECTION" >&2
+        exit 1
+        ;;
+esac
+
+if [ ! -f "$XAUTHORITY_VALUE" ]; then
+    echo "Missing Xauthority file: $XAUTHORITY_VALUE" >&2
+    exit 1
+fi
+
+if ! DISPLAY="$DISPLAY_VALUE" XAUTHORITY="$XAUTHORITY_VALUE" xrandr -q >/dev/null 2>&1; then
+    echo "Unable to query X display $DISPLAY_VALUE with XAUTHORITY=$XAUTHORITY_VALUE" >&2
+    exit 1
+fi
+
+DISPLAY="$DISPLAY_VALUE" XAUTHORITY="$XAUTHORITY_VALUE" xrandr -o "$DIRECTION"
+printf '%s\n' "$DIRECTION" > "$HOME/.farin-tv-orientation"
 EOF
 
 chmod +x "$AGENT_DIR/agent.py" "$AGENT_DIR/rotate.sh"
@@ -138,47 +216,49 @@ cat > "$AGENT_DIR/kiosk.sh" <<'EOF'
 #!/bin/bash
 set -u
 
-LOG_DIR="$HOME/.local/state/farin-tv"
-LOG_FILE="$LOG_DIR/kiosk.log"
-mkdir -p "$LOG_DIR"
+PROFILE_DIR="$HOME/.config/farin-tv/chromium-profile"
+mkdir -p "$PROFILE_DIR"
 
 URL="${1:-https://farin.app/tv}"
 
 # Wait for network and DNS before launching Chromium to prevent the "offline white screen"
 until ping -c 1 farin.app >/dev/null 2>&1; do
-    echo "$(date -Is) waiting for farin.app DNS/network" >> "$LOG_FILE"
+    echo "$(date -Is) waiting for farin.app DNS/network"
     sleep 2
 done
 
 # Loop forever to restart chromium if it crashes
 while true; do
     # Remove chromium error flags
-    sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
-    sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
+    sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
+    sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
 
-    echo "$(date -Is) launching chromium for $URL" >> "$LOG_FILE"
+    echo "$(date -Is) launching chromium for $URL"
 
     /usr/bin/chromium \
         --no-memcheck \
         --no-sandbox \
+        --user-data-dir="$PROFILE_DIR" \
         --kiosk \
         --noerrdialogs \
         --disable-infobars \
         --no-first-run \
+        --disable-session-crashed-bubble \
+        --disable-restore-session-state \
         --password-store=basic \
+        --disable-background-networking \
+        --disable-component-update \
+        --disable-default-apps \
+        --disable-domain-reliability \
         --disable-dev-shm-usage \
-        --disable-features=Translate,BlinkGenPropertyTrees,site-per-process \
+        --disable-features=Translate,BlinkGenPropertyTrees,site-per-process,MediaRouter,OptimizationHints \
         --disable-sync \
         --js-flags="--max-old-space-size=128" \
         --disk-cache-size=33554432 \
         --autoplay-policy=no-user-gesture-required \
-        --enable-logging=stderr \
-        --v=1 \
-        --remote-debugging-port=9222 \
-        --remote-debugging-address=0.0.0.0 \
-        "$URL" >> "$LOG_FILE" 2>&1
+        "$URL"
 
-    echo "$(date -Is) chromium exited with code $?" >> "$LOG_FILE"
+    echo "$(date -Is) chromium exited with code $?"
     sleep 5
 done
 EOF
@@ -209,7 +289,11 @@ else
 fi
 
 mkdir -p "$USER_HOME/.config/autostart"
-rm -f "$USER_HOME/.config/autostart/farin-tv-display.desktop"
+rm -f \
+    "$USER_HOME/.config/autostart/farin-tv-display.desktop" \
+    "$USER_HOME/.config/autostart/kiosk.desktop" \
+    "$USER_HOME/.config/autostart/chromium.desktop" \
+    "$USER_HOME/.config/autostart/firefox.desktop"
 
 echo "--- 6. Applying Low-RAM Kernel Optimizations ---"
 TOTAL_MEM_MB="$(free -m | awk '/^Mem:/{print $2}')"
@@ -226,13 +310,17 @@ PERCENT=150
 PRIORITY=100
 EOF
 
-    sudo systemctl daemon-reload || true
-    sudo systemctl restart zramswap || true
+    if systemctl is-active --quiet zramswap; then
+        echo "ZRAM swap already active; keeping the existing instance."
+    else
+        sudo systemctl daemon-reload || true
+        sudo systemctl enable --now zramswap || true
+    fi
 
     cat <<'EOF' | sudo tee /etc/sysctl.d/99-farin-tv.conf >/dev/null
-vm.swappiness=80
-vm.vfs_cache_pressure=500
-vm.min_free_kbytes=16384
+vm.swappiness=60
+vm.vfs_cache_pressure=150
+vm.min_free_kbytes=12288
 vm.overcommit_memory=1
 EOF
     sudo sysctl -p /etc/sysctl.d/99-farin-tv.conf || true
