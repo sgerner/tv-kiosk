@@ -2,7 +2,7 @@
 
 # Farin TV Display "Zero-Touch" Setup Script
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/sgerner/tv-kiosk/main/install-pi-display.sh | bash -s -- --code <CODE> [--location <ID>]
+#   curl -sSL https://raw.githubusercontent.com/sgerner/tv-kiosk/main/install-pi-display.sh | bash -s -- --code <CODE>
 
 set -euo pipefail
 
@@ -18,7 +18,6 @@ CONFIG_FILE="$USER_HOME/.farin-tv-config.json"
 AGENT_DIR="$USER_HOME/farin-agent"
 
 SETUP_CODE=""
-LOCATION_ID=""
 WIFI_SSID=""
 WIFI_PASSWORD=""
 WIFI_COUNTRY="${WIFI_COUNTRY:-US}"
@@ -174,7 +173,7 @@ while [[ "$#" -gt 0 ]]; do
                 echo "Error: --location requires a value."
                 exit 1
             fi
-            LOCATION_ID="$2"
+            echo "Warning: --location is deprecated and ignored. Setup code already determines location."
             shift 2
             ;;
         *)
@@ -209,6 +208,7 @@ sudo apt-get install -y \
     jq \
     python3 \
     python3-pip \
+    python3-websocket \
     chromium \
     x11-xserver-utils \
     unclutter \
@@ -273,18 +273,10 @@ fi
 echo "--- 2. Registering Device with Farin Cloud ---"
 SAFE_HOSTNAME="$(hostname | tr -d '"' | tr -d "\\\\")"
 
-if [[ -n "$LOCATION_ID" ]]; then
-    JSON_PAYLOAD="$(jq -n \
-        --arg code "$SETUP_CODE" \
-        --arg nickname "Raspberry Pi ($SAFE_HOSTNAME)" \
-        --arg location_id "$LOCATION_ID" \
-        '{code: $code, nickname: $nickname, location_id: $location_id}')"
-else
-    JSON_PAYLOAD="$(jq -n \
-        --arg code "$SETUP_CODE" \
-        --arg nickname "Raspberry Pi ($SAFE_HOSTNAME)" \
-        '{code: $code, nickname: $nickname}')"
-fi
+JSON_PAYLOAD="$(jq -n \
+    --arg code "$SETUP_CODE" \
+    --arg nickname "Raspberry Pi ($SAFE_HOSTNAME)" \
+    '{code: $code, nickname: $nickname}')"
 
 RESPONSE="$(
     curl -sS -w '\n%{http_code}' -X POST "$API_URL" \
@@ -337,6 +329,26 @@ configure_wifi "$WIFI_SSID" "$WIFI_PASSWORD" "$WIFI_COUNTRY" "$APPLY_WIFI_NOW"
 
 echo "--- 4. Python Runtime Ready ---"
 python3 --version
+
+if ! python3 - <<'PY'
+import importlib.util
+import sys
+sys.exit(0 if importlib.util.find_spec("websocket") else 1)
+PY
+then
+    echo "Installing Python websocket client..."
+    sudo apt-get install -y python3-websocket || true
+fi
+
+if ! python3 - <<'PY'
+import importlib.util
+import sys
+sys.exit(0 if importlib.util.find_spec("websocket") else 1)
+PY
+then
+    echo "Installing websocket-client with pip as fallback..."
+    python3 -m pip install --user --upgrade websocket-client
+fi
 
 echo "--- 5. Installing Tailscale ---"
 if ! command -v tailscale >/dev/null 2>&1; then
@@ -537,6 +549,12 @@ while true; do
     # Remove chromium error flags
     sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
     sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
+
+    # Clear stale profile locks left behind after power loss/crash.
+    if ! pgrep -af "/usr/lib/chromium/chromium .*--user-data-dir=$PROFILE_DIR" >/dev/null 2>&1 &&
+       ! pgrep -af "/usr/bin/chromium .*--user-data-dir=$PROFILE_DIR" >/dev/null 2>&1; then
+        rm -f "$PROFILE_DIR/SingletonLock" "$PROFILE_DIR/SingletonSocket" "$PROFILE_DIR/SingletonCookie"
+    fi
 
     echo "$(date -Is) launching chromium for $URL"
 
