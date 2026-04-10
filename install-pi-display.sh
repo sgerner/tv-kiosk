@@ -534,31 +534,32 @@ cat > "$AGENT_DIR/kiosk.sh" <<'EOF'
 set -u
 
 PROFILE_DIR="$HOME/.config/farin-tv/chromium-profile"
+LOG_FILE="$HOME/.farin-tv-kiosk.log"
 mkdir -p "$PROFILE_DIR"
 
 URL="${1:-https://farin.app/tv}"
+DISPLAY="${DISPLAY:-:0}"
+XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
 
-# Wait for network and DNS before launching Chromium to prevent the "offline white screen"
+# Wait for network and DNS before launching Chromium to prevent an offline blank screen.
 until ping -c 1 farin.app >/dev/null 2>&1; do
-    echo "$(date -Is) waiting for farin.app DNS/network"
+    echo "$(date -Is) waiting for farin.app DNS/network" | tee -a "$LOG_FILE"
     sleep 2
 done
 
-# Loop forever to restart chromium if it crashes
 while true; do
-    # Remove chromium error flags
     sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
     sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
 
-    # Clear stale profile locks left behind after power loss/crash.
+    # Remove stale profile locks if no Chromium process owns this profile.
     if ! pgrep -af "/usr/lib/chromium/chromium .*--user-data-dir=$PROFILE_DIR" >/dev/null 2>&1 &&
        ! pgrep -af "/usr/bin/chromium .*--user-data-dir=$PROFILE_DIR" >/dev/null 2>&1; then
         rm -f "$PROFILE_DIR/SingletonLock" "$PROFILE_DIR/SingletonSocket" "$PROFILE_DIR/SingletonCookie"
     fi
 
-    echo "$(date -Is) launching chromium for $URL"
+    echo "$(date -Is) launching chromium for $URL" | tee -a "$LOG_FILE"
 
-    /usr/bin/chromium \
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" /usr/bin/chromium \
         --no-memcheck \
         --no-sandbox \
         --user-data-dir="$PROFILE_DIR" \
@@ -574,15 +575,22 @@ while true; do
         --disable-default-apps \
         --disable-domain-reliability \
         --disable-dev-shm-usage \
-        --disable-features=Translate,BlinkGenPropertyTrees,site-per-process,MediaRouter,OptimizationHints \
+        --disable-gpu \
+        --disable-gpu-compositing \
+        --disable-accelerated-2d-canvas \
+        --disable-features=Translate,BlinkGenPropertyTrees,MediaRouter,OptimizationHints,BackForwardCache,site-per-process \
         --disable-sync \
-        --js-flags="--max-old-space-size=128" \
-        --disk-cache-size=33554432 \
+        --renderer-process-limit=2 \
+        --js-flags="--max-old-space-size=96" \
+        --disk-cache-size=16777216 \
         --autoplay-policy=no-user-gesture-required \
-        "$URL"
+        --ozone-platform=x11 \
+        "$URL" >> "$LOG_FILE" 2>&1
 
-    echo "$(date -Is) chromium exited with code $?"
-    sleep 5
+    rc=$?
+    echo "$(date -Is) chromium exited with code $rc" | tee -a "$LOG_FILE"
+    free -m | sed -n '1,3p' >> "$LOG_FILE" 2>&1 || true
+    sleep 3
 done
 EOF
 
