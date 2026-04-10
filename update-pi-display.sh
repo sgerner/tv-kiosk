@@ -233,6 +233,12 @@ while true; do
     sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
     sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
 
+    # Clear stale profile locks left behind after power loss/crash.
+    if ! pgrep -af "/usr/lib/chromium/chromium .*--user-data-dir=$PROFILE_DIR" >/dev/null 2>&1 &&
+       ! pgrep -af "/usr/bin/chromium .*--user-data-dir=$PROFILE_DIR" >/dev/null 2>&1; then
+        rm -f "$PROFILE_DIR/SingletonLock" "$PROFILE_DIR/SingletonSocket" "$PROFILE_DIR/SingletonCookie"
+    fi
+
     echo "$(date -Is) launching chromium for $URL"
 
     /usr/bin/chromium \
