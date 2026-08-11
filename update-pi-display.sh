@@ -10,6 +10,53 @@ AGENT_DIR="$USER_HOME/farin-agent"
 CONFIG_FILE="$USER_HOME/.farin-tv-config.json"
 PROJECT_URL="https://farin.app"
 DEVICE_TOKEN="$(jq -r '.token // empty' "$CONFIG_FILE" 2>/dev/null || true)"
+UPDATE_REQUESTED_AT="${FARIN_UPDATE_REQUESTED_AT:-}"
+UPDATE_TOKEN="${FARIN_DEVICE_TOKEN:-$DEVICE_TOKEN}"
+UPDATE_MARKER="${FARIN_UPDATE_MARKER:-}"
+UPDATE_REPORTED=0
+
+report_update_status() {
+    local status="$1"
+    local details="${2:-}"
+    [[ -n "$UPDATE_REQUESTED_AT" && -n "$UPDATE_TOKEN" ]] || return 0
+    local body
+    body="$(jq -cn \
+        --arg requested_at "$UPDATE_REQUESTED_AT" \
+        --arg status "$status" \
+        --arg error "$details" \
+        --arg version "2026-08-10-remote-update-v1" \
+        '{requested_at:$requested_at,status:$status,error:($error // ""),version:$version}')"
+    if curl -fsS --max-time 15 \
+        -X POST "$PROJECT_URL/api/tv/command" \
+        -H "Authorization: Bearer $UPDATE_TOKEN" \
+        -H 'Content-Type: application/json' \
+        --data "$body" >/dev/null; then
+        if [[ "$status" == "completed" || "$status" == "failed" ]]; then
+            UPDATE_REPORTED=1
+        fi
+    fi
+}
+
+cleanup_update_marker() {
+    if [[ -n "$UPDATE_MARKER" ]]; then
+        rm -f -- "$UPDATE_MARKER" || true
+    fi
+}
+
+on_update_exit() {
+    local exit_code="$?"
+    if [[ -n "$UPDATE_REQUESTED_AT" && "$UPDATE_REPORTED" -eq 0 ]]; then
+        if [[ "$exit_code" -eq 0 ]]; then
+            report_update_status completed
+        else
+            report_update_status failed "Updater exited with code $exit_code"
+        fi
+    fi
+    cleanup_update_marker
+    exit "$exit_code"
+}
+
+trap on_update_exit EXIT
 
 echo "--- 1. Updating Remote Management Agent ---"
 
@@ -36,8 +83,9 @@ except Exception:
     pass
 
 CONFIG_PATH = os.path.expanduser("~/.farin-tv-config.json")
-AGENT_VERSION = "2026-04-08-http-poll"
+AGENT_VERSION = "2026-08-10-remote-update-v1"
 POLL_INTERVAL_SECONDS = 5
+KIOSK_UPDATE_URL = "https://raw.githubusercontent.com/sgerner/tv-kiosk/main/update-pi-display.sh"
 
 
 def load_config():
@@ -56,6 +104,7 @@ def auth_headers(config):
     return {
         "Authorization": f"Bearer {config['token']}",
         "Content-Type": "application/json",
+        "User-Agent": f"Mozilla/5.0 (compatible; FarinTVAgent/{AGENT_VERSION})",
         "X-Farin-Agent-Version": AGENT_VERSION,
     }
 
@@ -102,7 +151,90 @@ def ack_command(config, requested_at):
         print(f"Command ack failed: {exc}", flush=True)
 
 
-def execute_command(command, payload):
+def report_command_status(config, requested_at, status, details=None, version=None):
+    payload = {
+        "requested_at": requested_at,
+        "status": status,
+        "error": details or "",
+        "version": version or AGENT_VERSION,
+    }
+    try:
+        http_json(command_endpoint(config), auth_headers(config), method="POST", payload=payload)
+    except Exception as exc:
+        print(f"Command status report failed: {exc}", flush=True)
+
+
+def update_marker_path(requested_at):
+    import hashlib
+
+    digest = hashlib.sha256(requested_at.encode("utf-8")).hexdigest()[:24]
+    marker_dir = os.path.expanduser("~/.config/farin-tv")
+    os.makedirs(marker_dir, exist_ok=True)
+    return os.path.join(marker_dir, f"kiosk-update-{digest}.active")
+
+
+def start_kiosk_update(config, requested_at, payload):
+    import hashlib
+    import re
+
+    update_url = str((payload or {}).get("update_url") or KIOSK_UPDATE_URL).strip()
+    expected_sha256 = str((payload or {}).get("update_sha256") or "").strip().lower()
+    if update_url != KIOSK_UPDATE_URL:
+        print("Ignoring update with an unapproved URL", flush=True)
+        report_command_status(config, requested_at, "failed", "Unapproved updater URL")
+        return False
+    if expected_sha256 and not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        print("Ignoring update with an invalid SHA-256", flush=True)
+        report_command_status(config, requested_at, "failed", "Invalid updater SHA-256")
+        return False
+
+    marker = update_marker_path(requested_at)
+    if os.path.exists(marker):
+        return False
+    with open(marker, "w", encoding="utf-8") as marker_file:
+        marker_file.write(requested_at)
+
+    report_command_status(config, requested_at, "started")
+    digest = hashlib.sha256(requested_at.encode("utf-8")).hexdigest()[:12]
+    home = os.path.expanduser("~")
+    expected_literal = expected_sha256.replace("'", "")
+    wrapper = """set -eu
+tmp_file=$(mktemp)
+trap 'rm -f "$tmp_file"' EXIT
+curl -fsSL --max-time 120 "$FARIN_KIOSK_UPDATE_URL" -o "$tmp_file"
+if [ -n "$FARIN_KIOSK_UPDATE_SHA256" ]; then
+    echo "$FARIN_KIOSK_UPDATE_SHA256  $tmp_file" | sha256sum -c -
+fi
+bash "$tmp_file"
+"""
+    command = [
+        "sudo",
+        "systemd-run",
+        f"--unit=farin-kiosk-update-{digest}",
+        "--collect",
+        f"--uid={os.getuid()}",
+        f"--setenv=HOME={home}",
+        f"--setenv=FARIN_KIOSK_UPDATE_URL={update_url}",
+        f"--setenv=FARIN_KIOSK_UPDATE_SHA256={expected_literal}",
+        f"--setenv=FARIN_DEVICE_TOKEN={config['token']}",
+        f"--setenv=FARIN_UPDATE_REQUESTED_AT={requested_at}",
+        f"--setenv=FARIN_UPDATE_MARKER={marker}",
+        "/bin/bash",
+        "-lc",
+        wrapper,
+    ]
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Failed to schedule kiosk update: {result.stderr.strip()}", flush=True)
+        report_command_status(config, requested_at, "failed", "Could not schedule updater")
+        try:
+            os.unlink(marker)
+        except FileNotFoundError:
+            pass
+    return False
+
+
+def execute_command(command, payload, config, requested_at):
     print(f"Executing Remote Command: {command}", flush=True)
     if command == "reboot":
         subprocess.Popen(["sudo", "reboot"])
@@ -117,6 +249,17 @@ def execute_command(command, payload):
     if command == "restart-kiosk":
         subprocess.run(["pkill", "-o", "chromium"], check=False)
         return True
+    if command == "refresh":
+        subprocess.run(["pkill", "-o", "chromium"], check=False)
+        return True
+    if command == "clear-cache":
+        subprocess.run(["pkill", "-o", "chromium"], check=False)
+        return True
+    if command == "reidentify":
+        print("Device identification is handled by the browser when available", flush=True)
+        return True
+    if command == "update-kiosk":
+        return start_kiosk_update(config, requested_at, payload)
     if command == "rotate-screen":
         direction = str((payload or {}).get("direction") or "normal").lower()
         if direction in ["normal", "inverted", "left", "right"]:
@@ -136,7 +279,7 @@ if __name__ == "__main__":
             requested_at = result.get("requested_at")
             payload = result.get("payload") or {}
             if command and requested_at:
-                if execute_command(command, payload):
+                if execute_command(command, payload, config, requested_at):
                     ack_command(config, requested_at)
             time.sleep(POLL_INTERVAL_SECONDS)
         except Exception as e:

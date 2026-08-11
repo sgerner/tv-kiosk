@@ -392,6 +392,7 @@ def auth_headers(config):
     return {
         "Authorization": f"Bearer {config['token']}",
         "Content-Type": "application/json",
+        "User-Agent": f"Mozilla/5.0 (compatible; FarinTVAgent/{AGENT_VERSION})",
         "X-Farin-Agent-Version": AGENT_VERSION,
     }
 
@@ -644,7 +645,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable farin-agent.service
 sudo systemctl restart farin-agent.service
 
-echo "--- 7. Setting up Minimal X/Openbox Kiosk ---"
+echo "--- 7. Installing Current Remote Update Agent ---"
+# New installs bootstrap the HTTP command agent immediately so future kiosk
+# updates can be delivered from Farin without another physical visit.
+curl -fsSL "https://raw.githubusercontent.com/sgerner/tv-kiosk/main/update-pi-display.sh" | bash
+
+echo "--- 8. Setting up Minimal X/Openbox Kiosk ---"
 
 mkdir -p "$USER_HOME/.config/openbox"
 if [[ -f "/etc/xdg/openbox/rc.xml" ]]; then

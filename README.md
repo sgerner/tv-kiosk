@@ -29,3 +29,10 @@ The background agent supports:
 - **Restart Kiosk**: Kills and restarts the Chromium process.
 - **Reboot**: Restarts the entire Raspberry Pi.
 - **Update OS**: Runs `sudo apt update && sudo apt upgrade -y` in the background.
+- **Update Kiosk**: Downloads the pinned updater release, verifies its SHA-256, applies it in a separate systemd scope, and reports the result to Farin.
+
+Kiosk updates are delivered through the authenticated command queue. The updater is only
+accepted from the approved GitHub URL, and Farin includes the expected SHA-256 for each
+release. The update runs outside the agent service so restarting the agent during an update
+does not terminate the updater. A one-time direct update is required for devices running an
+older agent that does not yet understand `update-kiosk`.
