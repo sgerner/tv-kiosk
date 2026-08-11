@@ -74,6 +74,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 try:
@@ -173,13 +174,26 @@ def update_marker_path(requested_at):
     return os.path.join(marker_dir, f"kiosk-update-{digest}.active")
 
 
+def is_approved_update_url(value):
+    parsed = urllib.parse.urlparse(value)
+    parts = parsed.path.strip("/").split("/")
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == "raw.githubusercontent.com"
+        and len(parts) == 4
+        and parts[0] == "sgerner"
+        and parts[1] == "tv-kiosk"
+        and parts[3] == "update-pi-display.sh"
+    )
+
+
 def start_kiosk_update(config, requested_at, payload):
     import hashlib
     import re
 
     update_url = str((payload or {}).get("update_url") or KIOSK_UPDATE_URL).strip()
     expected_sha256 = str((payload or {}).get("update_sha256") or "").strip().lower()
-    if update_url != KIOSK_UPDATE_URL:
+    if not is_approved_update_url(update_url):
         print("Ignoring update with an unapproved URL", flush=True)
         report_command_status(config, requested_at, "failed", "Unapproved updater URL")
         return False
