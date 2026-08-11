@@ -224,12 +224,6 @@ URL="${1:-https://farin.app/tv}"
 DISPLAY="${DISPLAY:-:0}"
 XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
 
-# Wait for network and DNS before launching Chromium to prevent an offline blank screen.
-until ping -c 1 farin.app >/dev/null 2>&1; do
-    echo "$(date -Is) waiting for farin.app DNS/network" | tee -a "$LOG_FILE"
-    sleep 2
-done
-
 while true; do
     sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
     sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true
